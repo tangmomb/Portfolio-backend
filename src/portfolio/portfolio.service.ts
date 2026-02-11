@@ -16,30 +16,77 @@ export class PortfolioService {
   private initSheets() {
     try {
       const credentialsPath = this.configService.get<string>('GOOGLE_APPLICATION_CREDENTIALS');
+      const credentialsJson = this.configService.get<string>('GOOGLE_APPLICATION_CREDENTIALS_JSON');
+      const credentialsB64 = this.configService.get<string>('GOOGLE_APPLICATION_CREDENTIALS_B64');
       const spreadsheetId = this.configService.get<string>('GOOGLE_SHEET_ID');
       
-      this.logger.log(`Initializing Sheets with: CREDENTIALS_PATH=${credentialsPath}, SHEET_ID=${spreadsheetId}`);
+      this.logger.log(
+        `Initializing Sheets with: CREDENTIALS_PATH=${credentialsPath}, ` +
+          `CREDENTIALS_JSON=${credentialsJson ? 'set' : 'unset'}, ` +
+          `CREDENTIALS_B64=${credentialsB64 ? 'set' : 'unset'}, ` +
+          `SHEET_ID=${spreadsheetId}`,
+      );
 
-      if (!credentialsPath) {
-        this.logger.error('GOOGLE_APPLICATION_CREDENTIALS is not defined in environment');
+      if (!credentialsPath && !credentialsJson && !credentialsB64) {
+        this.logger.error(
+          'No Google credentials configured. Set GOOGLE_APPLICATION_CREDENTIALS (path) ' +
+            'or GOOGLE_APPLICATION_CREDENTIALS_JSON / GOOGLE_APPLICATION_CREDENTIALS_B64.',
+        );
         return;
       }
 
-      const absolutePath = path.isAbsolute(credentialsPath) 
-        ? credentialsPath 
-        : path.join(process.cwd(), credentialsPath);
-      
-      this.logger.log(`Checking credentials at: ${absolutePath}`);
-      
-      if (!fs.existsSync(absolutePath)) {
-        this.logger.error(`Credentials file not found at: ${absolutePath}`);
-        return;
-      }
-
-      const auth = new google.auth.GoogleAuth({
-        keyFile: absolutePath,
+      let authOptions: { keyFile?: string; credentials?: object; scopes: string[] } = {
         scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
-      });
+      };
+
+      const normalizeCredentials = (creds: any) => {
+        if (creds && typeof creds.private_key === 'string') {
+          // Some env parsers keep literal "\n" instead of real newlines.
+          creds.private_key = creds.private_key.replace(/\\n/g, '\n');
+        }
+        return creds;
+      };
+
+      if (credentialsJson) {
+        try {
+          authOptions.credentials = normalizeCredentials(JSON.parse(credentialsJson));
+        } catch (error) {
+          this.logger.error('GOOGLE_APPLICATION_CREDENTIALS_JSON is not valid JSON');
+          return;
+        }
+      } else if (credentialsB64) {
+        try {
+          const decoded = Buffer.from(credentialsB64, 'base64').toString('utf8');
+          authOptions.credentials = normalizeCredentials(JSON.parse(decoded));
+        } catch (error) {
+          this.logger.error('GOOGLE_APPLICATION_CREDENTIALS_B64 is not valid base64 JSON');
+          return;
+        }
+      } else if (credentialsPath && credentialsPath.trim().startsWith('{')) {
+        try {
+          authOptions.credentials = normalizeCredentials(JSON.parse(credentialsPath));
+        } catch (error) {
+          this.logger.error(
+            'GOOGLE_APPLICATION_CREDENTIALS looks like JSON but is invalid. ' +
+              'Use a single-line JSON string or set a file path.',
+          );
+          return;
+        }
+      } else if (credentialsPath) {
+        const absolutePath = path.isAbsolute(credentialsPath)
+          ? credentialsPath
+          : path.join(process.cwd(), credentialsPath);
+
+        this.logger.log(`Checking credentials at: ${absolutePath}`);
+
+        if (!fs.existsSync(absolutePath)) {
+          this.logger.error(`Credentials file not found at: ${absolutePath}`);
+          return;
+        }
+        authOptions.keyFile = absolutePath;
+      }
+
+      const auth = new google.auth.GoogleAuth(authOptions);
       this.sheets = google.sheets({ version: 'v4', auth });
       this.logger.log('Google Sheets API initialized successfully');
     } catch (error) {
